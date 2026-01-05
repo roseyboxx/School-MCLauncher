@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Minecraft Launcher (Tkinter GUI) with strict version JSON library resolution,
-proxy downloads, auto detection of installed versions under ~/.minecraft,
-and correct classpath building to avoid NoSuchMethodError from missing libs.
+proxy downloads with multiple fallback URLs, auto detection of installed versions
+under ~/.minecraft, and correct classpath building to avoid NoSuchMethodError.
 """
 
 import os
@@ -17,6 +17,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 import uuid
 
+USERNAME = os.getlogin()
+print(f"Current user (os.getlogin()): {USERNAME}")
+
+
 # ----------------------------
 # CONFIG
 # ----------------------------
@@ -25,7 +29,21 @@ LIBRARIES_DIR = os.path.join(MINECRAFT_DIR, "libraries")
 VERSIONS_DIR = os.path.join(MINECRAFT_DIR, "versions")
 ASSETS_DIR = os.path.join(MINECRAFT_DIR, "assets")
 NATIVES_DIR = os.path.join(MINECRAFT_DIR, "natives")
-PROXY_PREFIX = "https://download-prx.izziefinnegan.workers.dev/?url="
+
+# List of proxy prefixes to try in order
+PROXY_PREFIXES = [
+    "https://supercool.learntotech.org/?url=",
+    "https://this.rankedmc.win/?url=",
+    "https://hvbh.grannygames.xyz/?url=",
+    "https://wbrivb2wi9ufh293bf2ubf82bvfg8bw.thegoofygang.org/?url=",
+    "https://superdupercoolthingy.izziefinnegan.workers.dev/?url=",
+    "https://download-prx.learntotech.org/?url=",
+    "https://download-pre.thegoofygang.org/?url=",
+    "https://download-prx.grannygames.xyz/?url=",
+    "https://download-prx.rankedmc.win/?url=",
+    "https://download-prx.izziefinnegan.workers.dev/?url="
+]
+
 JAVA_CMD = "java"
 XMS = "1G"
 XMX = "2G"
@@ -47,18 +65,34 @@ def verify_hash(path, expected_hash):
     return sha1.hexdigest() == expected_hash
 
 def proxy_download(url, dest, expected_hash=None):
+    """Try downloading a file through multiple proxies in order."""
     if os.path.exists(dest):
         if expected_hash and verify_hash(dest, expected_hash):
             return
         elif not expected_hash:
             return
+
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    full_url = PROXY_PREFIX + url
-    r = requests.get(full_url, stream=True)
-    r.raise_for_status()
-    with open(dest, "wb") as f:
-        for chunk in r.iter_content(1024 * 1024):
-            f.write(chunk)
+
+    last_exc = None
+    for prefix in PROXY_PREFIXES:
+        full_url = prefix + url
+        try:
+            print(f"Trying download from: {full_url}")
+            r = requests.get(full_url, stream=True, timeout=20)
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(1024 * 1024):
+                    f.write(chunk)
+            if expected_hash and not verify_hash(dest, expected_hash):
+                raise RuntimeError(f"Hash mismatch for {dest}")
+            return  # Success
+        except Exception as e:
+            print(f"Failed with proxy {prefix}: {e}")
+            last_exc = e
+            continue
+
+    raise RuntimeError(f"All proxy downloads failed for {url}") from last_exc
 
 def extract_natives(jar, target):
     with zipfile.ZipFile(jar, "r") as z:
@@ -121,16 +155,12 @@ def ensure_version_installed(version_id):
 
 def build_classpath(version_data, version_id):
     cp = []
-    # version JAR
     cp.append(os.path.join(VERSIONS_DIR, version_id, f"{version_id}.jar"))
-
-    # libraries from JSON
     for lib in version_data["libraries"]:
         downloads = lib.get("downloads", {})
         artifact = downloads.get("artifact")
         if artifact:
             cp.append(os.path.join(LIBRARIES_DIR, artifact["path"]))
-    # return macOS/Linux separator
     return ":".join(cp)
 
 def launch_game(profile):
@@ -146,7 +176,7 @@ def launch_game(profile):
         f"-Djava.library.path={NATIVES_DIR}",
         "-cp", classpath,
         version_data["mainClass"],
-        "--username", profile.get("username", "Player"),
+        "--username", USERNAME,
         "--version", version_id,
         "--gameDir", MINECRAFT_DIR,
         "--assetsDir", ASSETS_DIR,
@@ -157,8 +187,9 @@ def launch_game(profile):
     ]
     subprocess.run(cmd)
 
+# ----------------------------
 # Profiles
-
+# ----------------------------
 PROFILES_FILE = os.path.join(MINECRAFT_DIR, "launcher_profiles.json")
 
 def load_profiles():
@@ -179,9 +210,9 @@ def auto_detect_versions():
     profiles = load_profiles()
     for vid in os.listdir(VERSIONS_DIR):
         if os.path.isdir(os.path.join(VERSIONS_DIR, vid)):
-            if f"Offline-{vid}" not in profiles:
-                profiles[f"Offline-{vid}"] = {
-                    "username": "Player",
+            if f"{vid}" not in profiles:
+                profiles[f"{vid}"] = {
+                    "username": USERNAME,
                     "version": vid,
                     "xms": XMS,
                     "xmx": XMX
@@ -189,8 +220,9 @@ def auto_detect_versions():
     save_profiles(profiles)
     return profiles
 
+# ----------------------------
 # Tkinter UI
-
+# ----------------------------
 class GUI:
     def __init__(self, root):
         self.root = root
@@ -205,13 +237,12 @@ class GUI:
         ttk.Button(root, text="Play", command=self.play).grid(row=1, column=1)
 
     def add(self):
-        user = simpledialog.askstring("Username", "Enter username:")
         ver = simpledialog.askstring("Version", "Enter version (e.g., 1.20.2):")
-        if not user or not ver:
+        if not ver:
             return
         ensure_version_installed(ver)
-        pname = f"{user}-{ver}"
-        self.profiles[pname] = {"username": user, "version": ver, "xms": XMS, "xmx": XMX}
+        pname = f"{ver}"
+        self.profiles[pname] = {"username": USERNAME, "version": ver, "xms": XMS, "xmx": XMX}
         save_profiles(self.profiles)
         self.combo["values"] = list(self.profiles)
 
